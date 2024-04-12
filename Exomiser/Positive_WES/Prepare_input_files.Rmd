@@ -1,0 +1,114 @@
+---
+title: "EXOMISER : Preparation of input files"
+output:
+  github_document:
+    toc: true
+---
+
+### Load libraries
+
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+```
+
+
+# Step 1 : Preparation of the table containing patient id, path of vcf file and HPO terms
+
+
+```{r}
+# Load HPO table 
+wes_pos_annot <- read.csv("/Users/justine_labory/Desktop/These_ANR/positive_wes_hpo_table.csv")
+#wes_pos_annot
+
+# Modify the table to have all HPO terms in a same column separated by a space per patient
+wes_pos_annot_modified <- wes_pos_annot %>%
+  # remove hpo_name column
+  select(-hpo_name) %>%
+  # group data by patient id
+  group_by(patient_id) %>%
+  # create new column with all HPO terms of a patient separated by a space
+  summarise(hpo_terms = paste(hpo_id, collapse = " "))
+  
+#wes_pos_annot_modified
+
+# Add a column with path of vcf file 
+
+# Declare path where vcf files are stored
+path = "/Users/justine_labory/Desktop/These_ANR/data/positive_wes_vcf/raw_data_no_chr"
+
+# Get all the files inside the path according to the pattern
+list_vcf <- list.files(path = path, pattern = ".vcf", full.names = T)
+# Remove zipped files
+list_vcf <- list_vcf[!grepl('.vcf.gz', list_vcf)]
+
+# Change path of vcf files because the analysis will be performed on IRCAN server 
+list_vcf <- gsub("/Users/justine_labory/Desktop/These_ANR/data/positive_wes_vcf/raw_data_no_chr/","/home/jlabory/data/positive_wes_vcf/", list_vcf, fixed = T)
+
+# Add a column containing path of vcf file
+wes_pos_annot_modified$vcf_path <- list_vcf
+
+# Movevcf_path column at the second position
+wes_pos_annot_modified <- wes_pos_annot_modified %>%
+  relocate(vcf_path, .after = patient_id)
+
+# wes_pos_annot_modified
+
+# Save the file
+# write.table(wes_pos_annot_modified, "/Users/justine_labory/Desktop/These_ANR/positive_wes_table_vcfpath_hpoterms.tsv", row.names = F, col.names = F, quote = F, sep = "\t")
+```
+
+
+# Step 2 : Preparation of config files for EXOMISER analysis
+
+To run EXOMISER, we need a config file which contains a lot of information. AMong these information, we have to modify some in function of the input patient. <br>
+We have to modify :
+- HPO terms
+- path of input vcf
+- path of output files
+
+In order to avoid modifying config files by hand for each patient, I wrote a python script *modify_yml_file.py* that allows the modification of config file available in EXOMISER repository.
+
+```{bash, eval=FALSE}
+# Activate conda yaml environnement 
+conda activate yaml_env
+
+# Run the loop to modify the standard config file
+
+## read the file created just before with patient id, vcf file paths and HPO terms
+cat /Users/justine_labory/Desktop/These_ANR/exomiser/positive_wes/data/positive_wes_table_vcfpath_hpoterms.tsv | while read line ;
+## We cut the line by tabulation (column) and the first value corresponds to the first column which is the patient id
+do id=$(echo "$line" | cut -f 1) ;
+## second value = path of vcf file
+vcf=$(echo "$line" | cut -f 2) ;
+## third value = HPO terms
+hpo=$(echo "$line" | cut -f 3) ;
+## run python script modify_yml_file.py to modify config file with vcf and hpo variables. Then we have to specify the version of the genome (-g), the output path of EXOMISER output files (-p) and the output of the python script, the modified config file (-o)
+python3 /Users/justine_labory/Desktop/These_ANR/modify_yml_file.py -i /Users/justine_labory/Desktop/These_ANR/exomiser/config_maf001.yml -v $vcf -g hg19 -l $hpo -p "/home/jlabory/results/positive_wes/"$id"/"$id"-exome-PASS_ONLY" -o "/Users/justine_labory/Desktop/These_ANR/exomiser/positive_wes/data/yml_file/maf_0.01/"$id"_config.yml" ;
+done
+```
+
+# Step 3: Create the batch-commands file to run EXOMISER on multiple files at once (on IRCAN server)
+
+```{bash, eval=FALSE}
+# Go to the repository where there are all config files (yml files)
+cd /home/jlabory/data/nice_cohort/yml_file/maf_0.01/
+# Copy the string T--analysis 28 times (= the number of patient = number of config files) and store the output in a file (all_ymlfile_1.txt)
+yes "T--analysis" | head -n 28 > all_ymlfile_1.txt
+# Remove T of each line of the file
+sed -i "s/T//g" all_ymlfile_1.txt
+
+# Then display all paths of config file in another file (all_ymlfile_2.txt)
+for file in $(ls /home/jlabory/data/positive_wes_vcf/yml_file/maf_0.01/*yml) ;
+do echo $file >> all_ymlfile_2.txt ;
+done
+
+# Paste the two files
+paste -d ' ' all_ymlfile_1.txt all_ymlfile_2.txt > positive_wes-analysis-batch-commands.txt
+
+# In output path of EXOMISER, create a directory by patient to store all output files of a patient in the same directory
+for file in $(ls /home/jlabory/data/positive_wes_vcf/*.vcf) ;
+do new_name=$(echo $file | xargs -n1 basename  | cut -d '_' -f1) ;
+mkdir "/home/jlabory/results/positive_wes/"$new_name ;
+done
+```
+
