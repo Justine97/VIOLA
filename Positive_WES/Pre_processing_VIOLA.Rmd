@@ -1,0 +1,417 @@
+---
+title: "Pre-processing of positive WES"
+output:
+  github_document:
+    toc: true
+---
+
+Load libraries
+
+```{r, warning=FALSE, message=FALSE}
+library(xlsx)
+library(dplyr)
+```
+
+# Introduction
+
+We have a cohort composed of **28 patients** in which there are several families. Whole Exome Sequencing (WES) has been performed and for all patients, the responsible variant has been identified. We have "raw" vcf files and we need to annotate them with VEP to keep only rare variants and with CADD to run VIOLA.
+
+Several steps has been executed on **genotoul** server. On **genotoul** server, we can ask for the installation of almost all tools but we have to use *sbatch* command to run a script or a tool.
+
+# Step 1: Annotation with VEP
+
+This step has been performed on **genotoul** server.
+
+First, we add to create the *slurm* file.
+
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH -p workq
+#SBATCH -t  01-00:00:00 #Acceptable time formats include "minutes", "minutes:seconds", "hours:minutes:seconds", "days-hours", "days-hours:minutes" and "days-hours:minutes:seconds". 
+#SBATCH --mail-user=justine.labory@inrae.fr   # email address
+#SBATCH --mail-type=BEGIN
+#SBATCH --mail-type=END
+
+#Load modules
+module load bioinfo/Ensembl-VEP/111.0
+
+# no --species option because default is home_sapiens
+# no --assembly option because it takes the higher available, and here it was GRCH38 at this time
+# --cache_version specified because module load was for 110 version, and only 106 was installed at this time
+
+vep -i $1
+    -o $2
+    --verbose
+    --cache
+    --dir_cache=/home/jlabory/save/tool/vep/
+    --offline
+    --assembly GRCh37
+    --vcf
+    --check_existing
+    --af
+    --af_1kg
+    --af_gnomad
+```
+
+Then, we can run VEP.
+
+```{bash, eval=FALSE}
+for file in $(ls /home/jlabory/save/data/positive_wes_vcf/*.vcf) ;
+do new_name=$(echo $file | xargs -n1 basename  | cut -d '_' -f1) ;
+sbatch slurm_loop_vep.sh $file "/home/jlabory/work/tool/vep/res/positive_wes/"$new_name"_output_vep.vcf" ;
+done
+
+```
+
+# Step 2: Keep rare variants
+
+This step has been performed on **genotoul** server.
+
+First, we add to create the *slurm* file.
+
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH -p workq
+#SBATCH -t  01-00:00:00 #Acceptable time formats include "minutes", "minutes:seconds", "hours:minutes:seconds", "days-hours", "days-hours:minutes" and "days-hours:minutes:seconds". 
+#SBATCH --mail-user=justine.labory@inrae.fr   # email address
+#SBATCH --mail-type=END
+
+#Load modules
+module load bioinfo/Ensembl-VEP/111.0
+
+
+filter_vep -i $1 -o $2 -filter "SYMBOL and ((AF < 0.01 or gnomAD_AF < 0.01) or (not AF and not gnomAD_AF and not EUR_AF))"
+```
+
+Then, we can run *filter_vep*.
+
+```{bash, eval=FALSE}
+for file in $(ls /home/jlabory/work/tool/vep/res/positive_wes/*.vcf) ; do new_name=$(echo $file | xargs -n1 basename | cut -d  '_' -f1) ;
+sbatch slurm_loop_filter-vep.sh $file "/home/jlabory/work/tool/filter_vep/res/positive_wes/"$new_name"_rare_variant.vcf" ;
+done
+```
+
+# Step 3: Transform vcf to tsv
+
+Since, we will use *bcftools* to transform vcf files into tsv files, first, we have to transform 1,2 and 3 for chromosomes into chr1, chr2 and chr3...
+
+```{bash, eval=FALSE}
+for file in $(ls /home/jlabory/work/tool/filter_vep/res/positive_wes/*.vcf) ;
+do new_name=$(echo $file | xargs -n1 basename | cut -d  '_' -f1) ;
+awk '{if($0 !~ /^#/) print "chr"$0; else print $0}' $file > "/home/jlabory/work/tool/filter_vep/res/positive_wes/"$new_name"_rare_variant_with_chr.vcf" ;
+done
+```
+
+Then, we have to create a *slurm* file.
+
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH -p workq
+#SBATCH -t  01-00:00:00 #Acceptable time formats include "minutes", "minutes:seconds", "hours:minutes:seconds", "days-hours", "days-hours:minutes" and "days-hours:minutes:seconds". 
+#SBATCH --mail-user=justine.labory@inrae.fr   # email address
+#SBATCH --mail-type=END
+
+#Load module
+module load bioinfo/Bcftools/1.17
+
+echo -e "CHROM\tPOS\tREF\tALT\tGT\t$(bcftools +split-vep -l $1 | cut -f 2 | tr '\n' '\t' | sed 's/\t$//')" > $2 ;
+bcftools +split-vep -f '%CHROM\t%POS\t%REF\t%ALT\t[%GT]\t%CSQ\n' -d -A tab $1 >> $2
+```
+
+And now, we can run *bcftools +split-vep*.
+
+```{bash, eval=FALSE}
+for file in $(ls /home/jlabory/work/tool/filter_vep/res/positive_wes/*with_chr.vcf) ;
+do new_name=$(echo $file | xargs -n1 basename | cut -d  '_' -f1) ;
+sbatch slurm_loop_split-vep.sh $file "/home/jlabory/work/tool/bcftools/split_vep/res/positive_wes/"$new_name"_rare_variant.tsv" ;
+done
+```
+
+# Step 4: Annotation with CADD
+
+This step was executed on **mdlab server**.
+
+# Step 5: Merge VEP and CADD files to get rare variants annotated by CADD
+
+## Load data
+
+```{r}
+path_vep = "/Users/justine_labory/Desktop/These_ANR/data/res_splitvep/positive_wes"
+path_cadd = "/Users/justine_labory/Desktop/These_ANR/data/res_cadd/res_positive_wes"
+
+# Load table of responsible gene information
+df_resp_var <- read.xlsx("/Users/justine_labory/Desktop/These_ANR/positive_variant_WES_MD.xlsx", sheetIndex = 1)
+df_resp_var <- df_resp_var[,1:4]
+head(df_resp_var)
+```
+
+
+```{r, eval= FALSE, echo = FALSE, warning=FALSE}
+# Test the code to merge files
+
+id_patient = "02-WES"
+
+# Read VEP file
+pat1_vep <- read.table(paste0(path_vep, "/",id_patient,"_rare_variant.tsv"), header = T, sep = "\t")
+
+# Filter out variants with AF > 0.01 in any population
+pat1_vep_f <- pat1_vep %>%
+  mutate_at(vars(AF:gnomADe_SAS_AF), ~ ifelse(. == ".", 0, as.numeric(.))) %>%
+  filter_at(vars(AF:gnomADe_SAS_AF), all_vars((. < 0.01)))
+
+# Modify CHROM column in order to have 1,2,3 instead of chr1, chr2, chr3.
+pat1_vep_f$CHROM <- str_replace_all(pat1_vep_f$CHROM, "chr","")
+# Create an unique id with chromosome number, variant position, the gene name and the transcript. 
+#pat1_vep_f$unique_id = paste(pat1_vep_f$CHROM, pat1_vep_f$POS, pat1_vep_f$SYMBOL, pat1_vep_f$Feature, sep = "_")
+pat1_vep_f$unique_id = paste(pat1_vep_f$CHROM, pat1_vep_f$POS, sep = "_")
+
+# Read CADD file for the same patient
+pat1_cadd <- read.delim(paste0(path_cadd, "/",id_patient,"_cadd_output.tsv"), skip = 1, header = T)
+
+# Create an unique id with chromosome number, variant position, the gene name and the transcript.
+#pat1_cadd$unique_id <- paste(pat1_cadd$X.Chrom, pat1_cadd$Pos, pat1_cadd$GeneName, pat1_cadd$FeatureID, sep = "_")
+pat1_cadd$unique_id <- paste(pat1_cadd$X.Chrom, pat1_cadd$Pos, sep = "_")
+
+
+df_resp_var_pat <- df_resp_var %>%
+  filter(File.code == id_patient)
+
+if (nrow(df_resp_var_pat) == 1) {
+  
+  pattern_resp_var_1 = paste(df_resp_var_pat$Chromosome, df_resp_var_pat$variant, df_resp_var_pat$Gene, sep = "_")
+  pattern_resp_var_2 = "NOTAPATTERN"
+  
+} else {
+  
+  pattern_resp_var_1 = paste(df_resp_var_pat$Chromosome[1], df_resp_var_pat$variant[1], df_resp_var_pat$Gene[1], sep = "_")
+  pattern_resp_var_2 = paste(df_resp_var_pat$Chromosome[2], df_resp_var_pat$variant[2], df_resp_var_pat$Gene[2], sep = "_")
+  
+}
+
+
+
+
+df_merge <- pat1_cadd %>%
+  # Remove variants which are not associated to a gene
+  filter(! is.na(GeneName)) %>%
+  # Merge CADD file with VEP file to get only rare variants
+  inner_join(pat1_vep_f, by=c("unique_id" = "unique_id",
+                              "X.Chrom" = "CHROM",
+                              "Pos" = "POS",
+                              "Ref"="REF" ,
+                              "Alt" = "ALT",
+                              "GeneName" = "SYMBOL",
+                              "FeatureID" = "Feature")) %>%
+  # Remove variants with a genotype 0/0 which means that they are homozygous for the reference allele
+  #filter(GT != "0/0") %>%
+  # Put unique_id column at the first position
+  relocate(unique_id) %>%
+  mutate(responsible_variant = case_when(
+    str_starts(unique_id, pattern_resp_var_1) ~ 1,
+    str_starts(unique_id, pattern_resp_var_2) ~ 1,
+    TRUE ~ 0
+  ))
+
+df_merge
+
+# write.csv(df_merge, paste0("/Users/justine_labory/Desktop/These_ANR/All_Projects/Projet_VIOLA/positive_wes/input_viola/",id_patient,"_input_viola.csv"), row.names = F)
+```
+
+
+## Loop on all files
+
+* Step 1: Keep rare variants from VEP file
+* Step 2: Merge CADD and VEP file
+* Step 3: Filter out 0/0 variants
+
+But be careful, for patient 24, the *GT* (genotype) information is not available so we can not filter with *GT* column so we have to remove this step for the pre-processing of this file.
+
+```{r, warning=FALSE, eval=FALSE}
+for (i in c(sprintf("%02d",1:6),10:27)) {
+  
+  id_patient = paste0(i,"-WES")
+  print(id_patient)
+  
+  # Read VEP file
+  pat_vep <- read.table(paste0(path_vep, "/",id_patient,"_rare_variant.tsv"), header = T, sep = "\t")
+  
+  # Filter out variants with AF > 0.01 in any population
+  pat_vep_f <- pat_vep %>%
+    mutate_at(vars(AF:gnomADe_SAS_AF), ~ ifelse(. == ".", 0, as.numeric(.))) %>%
+    filter_at(vars(AF:gnomADe_SAS_AF), all_vars((. < 0.01)))
+  
+  # Modify CHROM column in order to have 1,2,3 instead of chr1, chr2, chr3.
+  pat_vep_f$CHROM <- str_replace_all(pat_vep_f$CHROM, "chr","")
+  # Create an unique id with chromosome number, variant position, the gene name and the transcript. 
+  pat_vep_f$unique_id = paste(pat_vep_f$CHROM, pat_vep_f$POS, pat_vep_f$SYMBOL, pat_vep_f$Feature, sep = "_")
+  
+  
+  # Read CADD file for the same patient
+  pat_cadd <- read.delim(paste0(path_cadd, "/",id_patient,"_cadd_output.tsv"), skip = 1, header = T)
+  
+  # Create an unique id with chromosome number, variant position, the gene name and the transcript.
+  pat_cadd$unique_id <- paste(pat_cadd$X.Chrom, pat_cadd$Pos, pat_cadd$GeneName, pat_cadd$FeatureID, sep = "_")
+  
+  
+  df_resp_var_pat <- df_resp_var %>%
+    filter(File.code == id_patient)
+  
+  if (nrow(df_resp_var_pat) == 1) {
+    
+    pattern_resp_var_1 = paste(df_resp_var_pat$Chromosome, df_resp_var_pat$variant, df_resp_var_pat$Gene, sep = "_")
+    pattern_resp_var_2 = "NOTAPATTERN"
+    
+  } else {
+    
+    pattern_resp_var_1 = paste(df_resp_var_pat$Chromosome[1], df_resp_var_pat$variant[1], df_resp_var_pat$Gene[1], sep = "_")
+    pattern_resp_var_2 = paste(df_resp_var_pat$Chromosome[2], df_resp_var_pat$variant[2], df_resp_var_pat$Gene[2], sep = "_")
+    
+  }
+  
+  
+  
+  
+  df_merge <- pat_cadd %>%
+    # Remove variants which are not associated to a gene
+    filter(! is.na(GeneName)) %>%
+    # Merge CADD file with VEP file to get only rare variants
+    inner_join(pat_vep_f, by=c("unique_id" = "unique_id",
+                                "X.Chrom" = "CHROM",
+                                "Pos" = "POS",
+                                "Ref"="REF" ,
+                                "Alt" = "ALT",
+                                "GeneName" = "SYMBOL",
+                                "FeatureID" = "Feature")) %>%
+    # Remove variants with a genotype 0/0 which means that they are homozygous for the reference allele
+    filter(GT != "0/0") %>%
+    # Put unique_id column at the first position
+    relocate(unique_id) %>%
+    mutate(responsible_variant = case_when(
+      str_starts(unique_id, pattern_resp_var_1) ~ 1,
+      str_starts(unique_id, pattern_resp_var_2) ~ 1,
+      TRUE ~ 0
+    ))
+  
+  print(table(df_merge$responsible_variant))
+  
+  write.csv(df_merge, paste0("/Users/justine_labory/Desktop/These_ANR/All_Projects/Projet_VIOLA/positive_wes/input_viola/",id_patient,"_input_viola.csv"), row.names = F)
+}
+```
+
+
+## Loop on all files without removing 0/0 variants
+
+* Step 1: Keep rare variants from VEP file
+* Step 2: Merge CADD and VEP file
+
+
+```{r, warning=FALSE, eval=FALSE}
+for (i in c(sprintf("%02d",1:6),10:27)) {
+  
+  id_patient = paste0(i,"-WES")
+  print(id_patient)
+  
+  # Read VEP file
+  pat_vep <- read.table(paste0(path_vep, "/",id_patient,"_rare_variant.tsv"), header = T, sep = "\t")
+  
+  # Filter out variants with AF > 0.01 in any population
+  pat_vep_f <- pat_vep %>%
+    mutate_at(vars(AF:gnomADe_SAS_AF), ~ ifelse(. == ".", 0, as.numeric(.))) %>%
+    filter_at(vars(AF:gnomADe_SAS_AF), all_vars((. < 0.01)))
+  
+  # Modify CHROM column in order to have 1,2,3 instead of chr1, chr2, chr3.
+  pat_vep_f$CHROM <- str_replace_all(pat_vep_f$CHROM, "chr","")
+  # Create an unique id with chromosome number, variant position, the gene name and the transcript. 
+  pat_vep_f$unique_id = paste(pat_vep_f$CHROM, pat_vep_f$POS, pat_vep_f$SYMBOL, pat_vep_f$Feature, sep = "_")
+  
+  
+  # Read CADD file for the same patient
+  pat_cadd <- read.delim(paste0(path_cadd, "/",id_patient,"_cadd_output.tsv"), skip = 1, header = T)
+  
+  # Create an unique id with chromosome number, variant position, the gene name and the transcript.
+  pat_cadd$unique_id <- paste(pat_cadd$X.Chrom, pat_cadd$Pos, pat_cadd$GeneName, pat_cadd$FeatureID, sep = "_")
+  
+  
+  df_resp_var_pat <- df_resp_var %>%
+    filter(File.code == id_patient)
+  
+  if (nrow(df_resp_var_pat) == 1) {
+    
+    pattern_resp_var_1 = paste(df_resp_var_pat$Chromosome, df_resp_var_pat$variant, df_resp_var_pat$Gene, sep = "_")
+    pattern_resp_var_2 = "NOTAPATTERN"
+    
+  } else {
+    
+    pattern_resp_var_1 = paste(df_resp_var_pat$Chromosome[1], df_resp_var_pat$variant[1], df_resp_var_pat$Gene[1], sep = "_")
+    pattern_resp_var_2 = paste(df_resp_var_pat$Chromosome[2], df_resp_var_pat$variant[2], df_resp_var_pat$Gene[2], sep = "_")
+    
+  }
+  
+  
+  
+  
+  df_merge <- pat_cadd %>%
+    # Remove variants which are not associated to a gene
+    filter(! is.na(GeneName)) %>%
+    # Merge CADD file with VEP file to get only rare variants
+    inner_join(pat_vep_f, by=c("unique_id" = "unique_id",
+                                "X.Chrom" = "CHROM",
+                                "Pos" = "POS",
+                                "Ref"="REF" ,
+                                "Alt" = "ALT",
+                                "GeneName" = "SYMBOL",
+                                "FeatureID" = "Feature")) %>%
+    # Remove variants with a genotype 0/0 which means that they are homozygous for the reference allele
+    # filter(GT != "0/0") %>%
+    # Put unique_id column at the first position
+    relocate(unique_id) %>%
+    mutate(responsible_variant = case_when(
+      str_starts(unique_id, pattern_resp_var_1) ~ 1,
+      str_starts(unique_id, pattern_resp_var_2) ~ 1,
+      TRUE ~ 0
+    ))
+  
+  print(table(df_merge$responsible_variant))
+  
+  write.csv(df_merge, paste0("/Users/justine_labory/Desktop/These_ANR/All_Projects/Projet_VIOLA/positive_wes/input_viola_allvar/",id_patient,"_input_viola_allvar.csv"), row.names = F)
+}
+```
+
+
+## Look at differences between the two loops
+
+```{r, results='hold'}
+path1 <- "/Users/justine_labory/Desktop/These_ANR/All_Projects/Projet_VIOLA/positive_wes/input_viola"
+path2 <- "/Users/justine_labory/Desktop/These_ANR/All_Projects/Projet_VIOLA/positive_wes/input_viola_allvar"
+
+list1 <- list.files(path = path1, patter="csv", full.names = T)
+list2 <- list.files(path = path2, patter="csv", full.names = T)
+
+df_res <- as.data.frame(matrix(nrow = length(list1), ncol = 5))
+names(df_res) <- c("id_patient", "nb_all_variant", "nb_variant_filtered", "nb_remove_var", "perc_remove_var")
+
+for (i in 1:length(list1)) {
+  
+  df1 = read.csv(list1[i])
+  df2 = read.csv(list2[i])
+  
+  df_res$id_patient[i] = substr(basename(list1[i]), 1, 6)
+  df_res$nb_all_variant[i] = nrow(df2)
+  df_res$nb_variant_filtered[i] = nrow(df1)
+  df_res$nb_remove_var[i] = nrow(df2) - nrow(df1)
+  df_res$perc_remove_var[i] = round(( (nrow(df2) - nrow(df1)) / nrow(df2) ) *100, 2)
+  
+}
+
+df_res
+
+# write.csv(df_res, "/Users/justine_labory/Desktop/These_ANR/All_Projects/Projet_VIOLA/positive_wes/table_preprocessing_input_viola_file.csv", row.names = F)
+```
+
+```{r, eval=FALSE, echo=FALSE}
+#
+toto <- read.csv("/Users/justine_labory/Desktop/These_ANR/res_dbscan_kneedle01-WES_res_dbscan.csv")
+table(toto$Cluster)
+```
+
+
