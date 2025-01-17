@@ -1,0 +1,166 @@
+---
+#title: "VIOLA Report"
+title: "`r sprintf('VIOLA report for file %s', params$file)`"
+date: '`r strftime(Sys.time(), format = "%B %d, %Y")`'
+output: html_document
+params:
+  directory:
+    value: x
+  file:
+    value: x
+---
+
+```{r setup, include=FALSE}
+options(java.parameters = c("-XX:+UseConcMarkSweepGC", "-Xmx8192m"))
+gc()
+knitr::opts_chunk$set(echo = FALSE)
+library(dplyr)
+library(xlsx)
+library(knitr)
+library(reactable)
+```
+
+```{r, echo=FALSE}
+hpo_term_md_related_to_a_gene <- read.table("/Users/justine_labory/Desktop/These_ANR/data/hpoterms_md_to_gene.txt", header = TRUE, sep = "\t")
+gene_identifier_hpo <- hpo_term_md_related_to_a_gene %>%
+  dplyr::select(gene_id, gene_symbol) %>%
+  distinct()
+```
+
+# Variant prioritization with VIOLA Score genotype
+
+
+```{r, echo=FALSE}
+output_viola <- read.csv(file.path(params$directory, params$file))
+
+# output_viola = read.csv("/Users/justine_labory/Desktop/github/VIOLA/test_filter_after_VAE/res_viola/raw_vcf/3-AS/3-AS_viola_score_genotype.csv")
+
+if (! "Mitocarta" %in% names(output_viola)) {
+  
+  #Import Mitocarta
+  mitocarta <- read.xlsx("/Users/justine_labory/Desktop/These_ANR/data/Human.MitoCarta3.0.xls", sheetIndex = 2, header = TRUE)
+  #Mitocarta has a column for gene synonyms, so we get all synonyms in a vector.
+  synonyms_mitocarta_gene <- c()
+  for (i in 1:nrow(mitocarta)) {
+    tmp <- strsplit(mitocarta$Synonyms[i],"\\|")
+    for (j in 1:length(tmp[[1]])) {
+      synonyms_mitocarta_gene <- c(synonyms_mitocarta_gene,tmp[[1]][j])
+    }
+  }
+  
+  output_viola$Mitocarta <- output_viola$GeneName %in% mitocarta$Symbol | output_viola$GeneName %in% synonyms_mitocarta_gene
+}
+
+output_viola_filt <- output_viola %>%
+  left_join(gene_identifier_hpo, by =c("GeneName" = "gene_symbol")) %>%
+  rename(VIOLA_score = vs,
+         rank_VS = rank_vs,
+         rank_VS_genotype = rank_vs_genotype,
+         related_to_MD = known_md_gene,
+         Consequence = Consequence.y) %>%
+  dplyr::select(rank_VS_genotype, rank_VS, VIOLA_score, X.Chrom:Type, AnnoType, Consequence, ConsDetail, GeneName, gene_id, Intron, Exon, GT, Existing_variation, Mitocarta,related_to_MD, is_unique, AF, gnomAD_AF,SIFTcat:PolyPhenVal, SpliceAI.acc.gain:MMSp_donorIntron, PHRED) %>%
+  arrange(rank_VS_genotype) %>%
+  # To keep only the top 20 variants
+  head(20)
+
+output_viola_filt <- output_viola_filt %>%
+  mutate(Gene = paste(
+    paste0('<a href="https://www.omim.org/search?search=',GeneName,'" target="_blank">OMIM</a>'),
+    paste0(' <a href="https://gtexportal.org/home/gene/',GeneName,'" target="_blank">GTEx</a>'),
+    paste0(' <a href="https://gnomad.broadinstitute.org/gene/',GeneName,'?dataset=gnomad_r3" target="_blank">gnomAD</a>'),
+    paste0(' <a href="https://useast.ensembl.org/Homo_sapiens/Gene/Summary?g=',GeneName,'" target="_blank">Ensembl</a>'),
+    paste0(' <a href="https://www.genecards.org/cgi-bin/carddisp.pl?gene=',GeneName,'" target="_blank">GeneCards</a>'),
+    paste0(' <a href="https://hpo.jax.org/browse/gene/NCBIGene:',gene_id,'" target="_blank">HPO</a>'),
+    sep = ","
+    ),
+    Variant = ifelse(Existing_variation != ".", paste(
+      paste0('<a href="https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg38&position=chr',X.Chrom,':',Pos,'" target="_blank">UCSC</a>'),
+      paste0(' <a href="https://gnomad.broadinstitute.org/variant/',X.Chrom,'-',Pos, '-', Ref, '-',Alt,'?dataset=gnomad_r3" target="_blank">gnomAD</a>'),
+      paste0(' <a href="https://www.ncbi.nlm.nih.gov/snp/',Existing_variation,'" target="_blank">dbSNP</a>'),
+      sep = ","
+      ),
+      
+      paste(
+        paste0('<a href="https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg38&position=chr',X.Chrom,':',Pos,'" target="_blank">UCSC</a>'),
+      paste0(' <a href="https://gnomad.broadinstitute.org/variant/',X.Chrom,'-',Pos, '-', Ref, '-',Alt,'?dataset=gnomad_r3" target="_blank">gnomAD</a>'),
+        sep=","
+        )
+      )
+         #,
+         
+         # Consequence = cell_spec(Consequence, "html", color = case_when(
+         #   Consequence == "STOP_GAINED" ~ "tomato",
+         #   Consequence == "NON_SYNONYMOUS" ~ "darkorange",
+         #   Consequence == "SPLICE_SITE" ~ "gold",
+         #   Consequence == "UPSTREAM" ~ "dodgerblue",
+         #   Consequence == "DOWNSTREAM" ~ "darkblue",
+         #   Consequence == "SYNONYMOUS" ~ "limegreen",
+         #   Consequence == "INTRONIC" ~ "darkorchid",
+         #   .default = "black"
+         #   
+         # ))
+        
+  
+  ) %>%
+  dplyr::relocate(Gene, Variant, .after = is_unique) %>%
+  dplyr::select(-gene_id)
+
+reactable(
+  output_viola_filt,
+  # Enable the sort of columns by ascending or descending order
+  sortable = TRUE,
+  # Show the "sort" icon next to columns
+  showSortable = TRUE,
+  # Table formatting (to render alternation of white and grey rows)
+  striped = TRUE,
+  # To render the table in all the html window
+  fullWidth = FALSE,
+  # To enable the filtering of columns
+  filterable = TRUE,
+  # To show the number of pages of the table
+  showPageSizeOptions = TRUE,
+  pageSizeOptions = c(10, 15,20),
+  defaultPageSize = 10,
+  #resizable = TRUE,
+  searchable = TRUE,
+   defaultColDef = colDef(
+    header = function(value) gsub("_", " ", value, fixed = TRUE),
+    cell = function(value) format(value, nsmall = 1),
+    align = "center",
+    #resizable = TRUE
+   ),
+  #theme = theme,
+  columns = list(
+    VIOLA_score = colDef(filterable = FALSE),
+    Ref = colDef(sortable = FALSE),
+    Alt = colDef(sortable = FALSE),
+    Type = colDef(sortable = FALSE),
+    AnnoType = colDef(sortable = FALSE),
+    Consequence = colDef(sortable = FALSE),
+    ConsDetail = colDef(sortable = FALSE),
+    GeneName = colDef(sortable = FALSE),
+    Intron = colDef(sortable = FALSE),
+    Exon = colDef(sortable = FALSE),
+    Existing_variation = colDef(sortable = FALSE),
+    Gene = colDef(sortable = FALSE, filterable = FALSE, html = TRUE),
+    Variant = colDef(sortable = FALSE, filterable = FALSE, html = TRUE)
+
+  ),
+  # Column headers : group columns by category
+  columnGroups = list(
+    colGroup(name = "Annotations", columns = names(output_viola_filt)[4:19]),
+    colGroup(name = "Ressources", columns = c("Gene", "Variant")),
+    colGroup(name = "Minor Allele Frequency", c("AF", "gnomAD_AF")),
+    colGroup(name = "Scores", columns = names(output_viola_filt)[24:37])
+  ),
+
+  # To enable selection of rows
+  selection = "multiple",
+  borderless = TRUE,
+  onClick = "select",
+  theme = reactableTheme(
+    rowSelectedStyle = list(backgroundColor = "#eee", boxShadow = "inset 2px 0 0 0 #ffa62d")
+  )
+)
+```
+
